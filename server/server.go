@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/cenkalti/backoff/v4"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
@@ -279,16 +281,24 @@ func (s *Server) OnStateChange() {
 	if (prevState == environment.ProcessStartingState || prevState == environment.ProcessRunningState) && s.Environment.State() == environment.ProcessOfflineState {
 		s.Log().Info("detected server as entering a crashed state; running crash handler")
 
-		go func(server *Server) {
-			if err := server.handleServerCrash(); err != nil {
-				if IsTooFrequentCrashError(err) {
-					server.Log().Info("did not restart server after crash; occurred too soon after the last")
-				} else {
-					s.PublishConsoleOutputFromDaemon("Server crash was detected but an error occurred while handling it.")
-					server.Log().WithField("error", err).Error("failed to handle server crash")
-				}
-			}
-		}(s)
+		go doCrashRestart(s)
+	}
+}
+
+func doCrashRestart(server *Server) {
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = 0
+
+	if err := server.handleServerCrash(); err != nil {
+		if IsTooFrequentCrashError(err) {
+			server.Log().Info("did not restart server after crash; occurred too soon after the last")
+		} else {
+			server.PublishConsoleOutputFromDaemon("Server crash was detected but an error occurred while handling it.")
+			server.Log().WithField("error", err).Error("failed to handle server crash, retrying")
+
+			time.Sleep(b.NextBackOff())
+			doCrashRestart(server)
+		}
 	}
 }
 
